@@ -928,6 +928,12 @@ fn resolve_returns(
 
   use name <- eval.try(eval.from_result(try_convert_name))
 
+  let name =
+    case name {
+      gleam.ValueIdentifier("type") -> gleam.ValueIdentifier("type_")
+      _ -> name
+    }
+
   let field = gleam.Field(label: name, type_:)
   eval.return(field)
 }
