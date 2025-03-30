@@ -61,7 +61,7 @@ pub type Field {
 /// > 💡 This can only be built using the `gleam.value_identifier` function that
 /// > ensures that a string is a valid Gleam identifier.
 ///
-pub opaque type ValueIdentifier {
+pub type ValueIdentifier {
   ValueIdentifier(String)
 }
 
