@@ -672,7 +672,7 @@ fn enum_encoder_doc(
 
   let case_ = pipe_call_doc("pog.text", case_, [])
 
-  fun_doc(Private, enum_encoder_name(name), [var_name], [case_])
+  fun_doc(Public, enum_encoder_name(name), [var_name], [case_])
 }
 
 fn enum_decoder_doc(
