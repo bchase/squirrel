@@ -12,7 +12,7 @@ this:
 
 ```gleam
 import pog
-import decode/zero
+import gleam/dynamic/decode
 
 pub type FindSquirrelRow {
   FindSquirrelRow(name: String, owned_acorns: Int)
@@ -22,9 +22,9 @@ pub type FindSquirrelRow {
 ///
 pub fn find_squirrel(db: pog.Connection, name: String) {
   let squirrel_row_decoder = {
-    use name <- zero.field(0, zero.string)
-    use owned_acorns <- zero.field(1, zero.int)
-    zero.success(FindSquirrelRow(name:, owned_acorns:))
+    use name <- decode.field(0, decode.string)
+    use owned_acorns <- decode.field(1, decode.int)
+    decode.success(FindSquirrelRow(name:, owned_acorns:))
   }
 
   "
@@ -38,7 +38,7 @@ pub fn find_squirrel(db: pog.Connection, name: String) {
   "
   |> pog.query
   |> pog.parameter(pog.text(name))
-  |> pog.returning(zero.run(_, squirrel_row_decoder))
+  |> pog.returning(squirrel_row_decoder)
   |> pog.execute(db)
 }
 ```
@@ -64,7 +64,7 @@ Instead of the hand written example shown earlier you can instead just write the
 following query:
 
 ```sql
--- we're in file `src/squirrels/sql/find_squirrel.sql`
+-- we're in file `src/my_app/sql/find_squirrel.sql`
 -- Find a squirrel and its owned acorns given its name.
 select
   name,
@@ -80,13 +80,13 @@ function `find_squirrel` you can use just as you'd expect:
 
 ```gleam
 import pog
-import squirrels/sql
+import my_app/sql
 
 pub fn main() {
   let db = todo as "the pog connection"
   // And it just works as you'd expect:
-  let assert Ok(pog.Returned(_rows_count, rows)) = sql.find_squirrel("sandy")
-  let assert [FindSquirrelRow(name: "sandy", owned_acorns: 11_111)] = rows
+  let assert Ok(pog.Returned(_rows_count, rows)) = sql.find_squirrel(db, "sandy")
+  let assert [sql.FindSquirrelRow(name: "sandy", owned_acorns: 11_111)] = rows
 }
 ```
 
@@ -134,16 +134,16 @@ work:
 >
 > ```txt
 > ├── src
-> │   ├── squirrels
+> │   ├── my_app
 > │   │   └── sql
 > │   │       ├── find_squirrel.sql
 > │   │       └── list_squirrels.sql
-> │   └── squirrels.gleam
+> │   └── my_app.gleam
 > └── test
->     └── squirrels_test.gleam
+>     └── my_app_test.gleam
 > ```
 >
-> Running `gleam run -m squirrel` will create a `src/squirrels/sql.gleam` file
+> Running `gleam run -m squirrel` will create a `src/my_app/sql.gleam` file
 > defining two functions `find_squirrel` and `list_squirrels` you can then
 > import and use in your code.
 
@@ -165,7 +165,7 @@ the Postgres server where the database is defined. To connect, it will read the
 following format:
 
 ```txt
-postgres://user:password@host:port/database
+postgres://user:password@host:port/database?connect_timeout=seconds
 ```
 
 If a `DATABASE_URL` variable is not set, Squirrel will instead read your
@@ -177,6 +177,7 @@ and use the following defaults if one is not set:
 - `PGUSER`: `"postgres"`
 - `PGDATABASE`: the name of your Gleam project
 - `PGPASSWORD`: `""`
+- `PGCONNECT_TIMEOUT`: `5` seconds
 
 ## Supported types
 
@@ -190,19 +191,20 @@ This is needed in two places:
 
 The types that are currently supported are:
 
-| postgres type                                     | encoded as                                                                                      | decoded as                                                                                      |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `bool`                                            | `Bool`                                                                                          | `Bool`                                                                                          |
-| `text`, `char`, `bpchar`, `varchar`               | `String`                                                                                        | `String`                                                                                        |
-| `float4`, `float8`, `numeric`                     | `Float`                                                                                         | `Float`                                                                                         |
-| `int2`, `int4`, `int8`                            | `Int`                                                                                           | `Int`                                                                                           |
-| `json`, `jsonb`                                   | [`Json`](https://hexdocs.pm/gleam_json/gleam/json.html#Json)                                    | `String`                                                                                        |
-| `uuid`                                            | [`Uuid`](https://hexdocs.pm/youid/youid/uuid.html#Uuid)                                         | [`Uuid`](https://hexdocs.pm/youid/youid/uuid.html#Uuid)                                         |
-| `bytea`                                           | `BitArray`                                                                                      | `BitArray`                                                                                      |
-| `date`                                            | `#(Int, Int, Int)` with `#(year, month, day)`                                                   | `#(Int, Int, Int)` with `#(year, month, day)`                                                   |
-| `timestamp`                                       | `#(#(Int, Int, Int), (#(Int, Int, Int))` with `#(#(year, month, day), #(hour, minute, second))` | `#(#(Int, Int, Int), (#(Int, Int, Int))` with `#(#(year, month, day), #(hour, minute, second))` |
-| `<type>[]` (where `<type>` is any supported type) | `List(<type>)`                                                                                  | `List(<type>)`                                                                                  |
-| user-defined enum                                 | [Gleam custom type](https://tour.gleam.run/data-types/custom-types/)                            | [Gleam custom type](https://tour.gleam.run/data-types/custom-types/)                            |
+| postgres type                                     | encoded as                                                                                 | decoded as                                                                                 |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `bool`                                            | `Bool`                                                                                     | `Bool`                                                                                     |
+| `text`, `char`, `bpchar`, `varchar`, `citext`     | `String`                                                                                   | `String`                                                                                   |
+| `float4`, `float8`, `numeric`                     | `Float`                                                                                    | `Float`                                                                                    |
+| `int2`, `int4`, `int8`                            | `Int`                                                                                      | `Int`                                                                                      |
+| `json`, `jsonb`                                   | [`json.Json`](https://hexdocs.pm/gleam_json/gleam/json.html#Json)                          | `String`                                                                                   |
+| `uuid`                                            | [`uuid.Uuid`](https://hexdocs.pm/youid/youid/uuid.html#Uuid)                               | [`uuid.Uuid`](https://hexdocs.pm/youid/youid/uuid.html#Uuid)                               |
+| `bytea`                                           | `BitArray`                                                                                 | `BitArray`                                                                                 |
+| `date`                                            | [`calendar.Date`](https://hexdocs.pm/gleam_time/gleam/time/calendar.html#Date)             | [`calendar.Date`](https://hexdocs.pm/gleam_time/gleam/time/calendar.html#Date)             |
+| `time`                                            | [`calendar.TimeOfDay`](https://hexdocs.pm/gleam_time/gleam/time/calendar.html#TimeOfDay)   | [`calendar.TimeOfDay`](https://hexdocs.pm/gleam_time/gleam/time/calendar.html#TimeOfDay)   |
+| `timestamp`                                       | [`timestamp.Timestamp`](https://hexdocs.pm/gleam_time/gleam/time/timestamp.html#Timestamp) | [`timestamp.Timestamp`](https://hexdocs.pm/gleam_time/gleam/time/timestamp.html#Timestamp) |
+| `<type>[]` (where `<type>` is any supported type) | `List(<type>)`                                                                             | `List(<type>)`                                                                             |
+| user-defined enum                                 | [Gleam custom type](https://tour.gleam.run/data-types/custom-types/)                       | [Gleam custom type](https://tour.gleam.run/data-types/custom-types/)                       |
 
 ### Enums
 

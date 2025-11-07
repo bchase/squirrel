@@ -1,9 +1,15 @@
 ---
-version: 1.2.5
+version: 1.4.0
 title: query with multiline comment
 file: ./test/squirrel_test.gleam
 test_name: query_with_multiline_comment_test
 ---
+//// This module contains the code to run the sql queries defined in
+//// `./test-directory`.
+//// > 🐿️ This module was generated automatically using v-test of
+//// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+////
+
 import gleam/dynamic/decode
 import pog
 
@@ -23,7 +29,9 @@ pub type QueryRow {
 /// > 🐿️ This function was generated automatically using v-test of
 /// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
 ///
-pub fn query(db) {
+pub fn query(
+  db: pog.Connection,
+) -> Result(pog.Returned(QueryRow), pog.QueryError) {
   let decoder = {
     use res <- decode.field(0, decode.bool)
     decode.success(QueryRow(res:))
@@ -38,3 +46,4 @@ select true as res
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
+

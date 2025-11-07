@@ -1,30 +1,21 @@
 ---
-version: 1.2.5
+version: 1.4.0
 title: generated type fields are labelled with their name in the select list
 file: ./test/squirrel_test.gleam
 test_name: generated_type_fields_are_labelled_with_their_name_in_the_select_list_test
 ---
+
 import gleam/dynamic/decode
 import gleam/option.{type Option}
 import pog
 
-/// A row you get from running the `query` query
-/// defined in `query.sql`.
-///
-/// > 🐿️ This type definition was generated automatically using v-test of the
-/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
 pub type QueryRow {
   QueryRow(acorns: Option(Int), squirrel_name: String)
 }
 
-/// Runs the `query` query
-/// defined in `query.sql`.
-///
-/// > 🐿️ This function was generated automatically using v-test of
-/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
-pub fn query(db) {
+pub fn query(
+  db: pog.Connection,
+) -> Result(pog.Returned(QueryRow), pog.QueryError) {
   let decoder = {
     use acorns <- decode.field(0, decode.optional(decode.int))
     use squirrel_name <- decode.field(1, decode.string)
@@ -42,3 +33,4 @@ from
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
+

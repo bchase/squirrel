@@ -249,7 +249,7 @@ pub type ConnectionOptions {
     user: String,
     password: String,
     database: String,
-    timeout: Int,
+    timeout_seconds: Int,
   )
 }
 
@@ -274,13 +274,15 @@ fn pg_to_gleam_type(
     PBase(name:) ->
       case name {
         "bool" -> Ok(gleam.Bool)
-        "text" | "char" | "bpchar" | "varchar" -> Ok(gleam.String)
-        "float4" | "float8" | "numeric" -> Ok(gleam.Float)
+        "text" | "char" | "bpchar" | "varchar" | "citext" -> Ok(gleam.String)
+        "float4" | "float8" -> Ok(gleam.Float)
+        "numeric" -> Ok(gleam.Numeric)
         "int2" | "int4" | "int8" -> Ok(gleam.Int)
         "json" | "jsonb" -> Ok(gleam.Json)
         "uuid" -> Ok(gleam.Uuid)
         "bytea" -> Ok(gleam.BitArray)
         "date" -> Ok(gleam.Date)
+        "time" -> Ok(gleam.TimeOfDay)
         "timestamp" -> Ok(gleam.Timestamp)
         _ -> Error(unsupported_type_error(query, name))
       }
@@ -305,11 +307,20 @@ pub fn main(
   queries: List(UntypedQuery),
   connection: ConnectionOptions,
 ) -> Result(#(List(TypedQuery), List(Error)), Error) {
+  let ConnectionOptions(
+    host:,
+    port:,
+    timeout_seconds:,
+    user:,
+    password:,
+    database:,
+  ) = connection
+
   use db <- result.try(
-    pg.connect(connection.host, connection.port, connection.timeout)
+    pg.connect(host, port, timeout_seconds * 1000)
     |> result.map_error(error.PgCannotEstablishTcpConnection(
-      host: connection.host,
-      port: connection.port,
+      host: host,
+      port: port,
       reason: _,
     )),
   )
@@ -326,7 +337,7 @@ pub fn main(
   //
 
   let setup_script = {
-    use _ <- eval.try(authenticate(connection))
+    use _ <- eval.try(authenticate(user:, database:, password:))
     use _ <- eval.try(ensure_postgres_version())
     eval.return(Nil)
   }
@@ -341,9 +352,11 @@ pub fn main(
   |> Ok
 }
 
-fn authenticate(connection: ConnectionOptions) -> Db(Nil) {
-  let ConnectionOptions(user:, database:, password:, ..) = connection
-
+fn authenticate(
+  user user: String,
+  database database: String,
+  password password: String,
+) -> Db(Nil) {
   let params = [#("user", user), #("database", database)]
   use _ <- eval.try(send(pg.FeStartupMessage(params)))
 
@@ -381,10 +394,7 @@ fn authenticate(connection: ConnectionOptions) -> Db(Nil) {
     // In case there's a receive error while waiting for the server to be ready
     // we want to display a more helpful error message because the problem here
     // must be with an invalid username/database combination.
-    |> eval.replace_error(error.PgInvalidUserDatabase(
-      user: connection.user,
-      database: connection.database,
-    )),
+    |> eval.replace_error(error.PgInvalidUserDatabase(user:, database:)),
   )
 
   eval.return(Nil)
@@ -396,7 +406,7 @@ fn ensure_postgres_version() -> Db(Nil) {
   let assert [[version, ..], ..] = version
     as "select version should always return at least one row"
 
-  case bit_array.to_string(version) |> result.then(int.parse) {
+  case result.try(bit_array.to_string(version), int.parse) {
     Error(_) -> eval.throw(error.PostgresVersionHasInvalidFormat(version))
     Ok(version) if version >= minimum_required_version -> eval.return(Nil)
     Ok(_) -> eval.throw(error.PostgresVersionIsTooOld)
@@ -549,8 +559,17 @@ fn infer_types(query: UntypedQuery) -> Db(TypedQuery) {
   //   - But this is not enough! If a returned column comes from a left/right
   //     join it will be nullable even if it is not in the original table.
   //     To work around this we'll have to inspect the query plan.
-  use plan <- eval.try(query_plan(query))
-  let nullables = nullables_from_plan(plan)
+  //
+  use nullables <- eval.try(
+    // For some special queries (like `do` blocks), it's not actually possible
+    // to run an `explain` query and the `query_plan` function will just fail.
+    // Instead of returning an error (since we want to support `do` blocks as
+    // well) we will have to make do with slightly imprecise inferred types!
+    eval.attempt(
+      eval.map(query_plan(query), nullables_from_plan),
+      fn(_context, _error) { eval.return(set.new()) },
+    ),
+  )
   use returns <- eval.try(resolve_returns(query, returns, nullables))
 
   query

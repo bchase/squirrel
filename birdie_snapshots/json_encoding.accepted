@@ -1,20 +1,18 @@
 ---
-version: 1.2.5
+version: 1.4.0
 title: json encoding
 file: ./test/squirrel_test.gleam
 test_name: json_encoding_test
 ---
+
 import gleam/dynamic/decode
-import gleam/json
+import gleam/json.{type Json}
 import pog
 
-/// Runs the `query` query
-/// defined in `query.sql`.
-///
-/// > 🐿️ This function was generated automatically using v-test of
-/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
-pub fn query(db, arg_1) {
+pub fn query(
+  db: pog.Connection,
+  arg_1: Json,
+) -> Result(pog.Returned(Nil), pog.QueryError) {
   let decoder = decode.map(decode.dynamic, fn(_) { Nil })
 
   "insert into jsons(json) values ($1)"
@@ -23,3 +21,4 @@ pub fn query(db, arg_1) {
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
+

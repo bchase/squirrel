@@ -1,0 +1,23 @@
+---
+version: 1.4.0
+title: squirrel supports do blocks
+file: ./test/squirrel_test.gleam
+test_name: squirrel_supports_do_blocks_test
+---
+
+import gleam/dynamic/decode
+import pog
+
+pub fn query(db: pog.Connection) -> Result(pog.Returned(Nil), pog.QueryError) {
+  let decoder = decode.map(decode.dynamic, fn(_) { Nil })
+
+  "
+  do $$ begin
+    select 1;
+  end $$;
+  "
+  |> pog.query
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+

@@ -234,10 +234,14 @@ fn gleam_type_to_decoder(
       let #(state, inner_decoder) = gleam_type_to_decoder(state, type_)
       #(state, call_doc("decode.optional", [inner_decoder]))
     }
-    gleam.Date -> #(state, doc.from_string("pog.date_decoder()"))
+    gleam.Date -> #(state, doc.from_string("pog.calendar_date_decoder()"))
+    gleam.TimeOfDay -> {
+      #(state, doc.from_string("pog.calendar_time_of_day_decoder()"))
+    }
     gleam.Timestamp -> #(state, doc.from_string("pog.timestamp_decoder()"))
     gleam.Int -> #(state, doc.from_string("decode.int"))
     gleam.Float -> #(state, doc.from_string("decode.float"))
+    gleam.Numeric -> #(state, doc.from_string("pog.numeric_decoder()"))
     gleam.Bool -> #(state, doc.from_string("decode.bool"))
     gleam.String -> #(state, doc.from_string("decode.string"))
     gleam.BitArray -> #(state, doc.from_string("decode.bit_array"))
@@ -284,10 +288,11 @@ fn gleam_type_to_encoder(
       let doc = call_doc("pog.text", [call_doc("json.to_string", [name])])
       #(state, doc)
     }
-    gleam.Date -> #(state, call_doc("pog.date", [name]))
+    gleam.Date -> #(state, call_doc("pog.calendar_date", [name]))
+    gleam.TimeOfDay -> #(state, call_doc("pog.calendar_time_of_day", [name]))
     gleam.Timestamp -> #(state, call_doc("pog.timestamp", [name]))
     gleam.Int -> #(state, call_doc("pog.int", [name]))
-    gleam.Float -> #(state, call_doc("pog.float", [name]))
+    gleam.Float | gleam.Numeric -> #(state, call_doc("pog.float", [name]))
     gleam.Bool -> #(state, call_doc("pog.bool", [name]))
     gleam.String -> #(state, call_doc("pog.text", [name]))
     gleam.BitArray -> #(state, call_doc("pog.bytea", [name]))
@@ -304,31 +309,58 @@ fn enum_encoder_name(enum_name: TypeIdentifier) -> String {
   |> string.append("_encoder")
 }
 
+type TypePosition {
+  EnumField
+  FunctionArgument
+}
+
 fn gleam_type_to_field_type(
   state: CodeGenState,
   type_: gleam.Type,
+  position: TypePosition,
 ) -> #(CodeGenState, Document) {
   case type_ {
     gleam.List(type_) -> {
-      let #(state, inner_type) = gleam_type_to_field_type(state, type_)
+      let #(state, inner_type) =
+        gleam_type_to_field_type(state, type_, position)
       #(state, call_doc("List", [inner_type]))
     }
     gleam.Option(type_) -> {
       let state = state |> import_qualified("gleam/option", "type Option")
-      let #(state, inner_type) = gleam_type_to_field_type(state, type_)
+      let #(state, inner_type) =
+        gleam_type_to_field_type(state, type_, position)
       #(state, call_doc("Option", [inner_type]))
     }
     gleam.Uuid -> #(
       state |> import_qualified("youid/uuid", "type Uuid"),
       doc.from_string("Uuid"),
     )
-    gleam.Date -> #(state, doc.from_string("pog.Date"))
-    gleam.Timestamp -> #(state, doc.from_string("pog.Timestamp"))
+    gleam.Date -> {
+      let state = state |> import_qualified("gleam/time/calendar", "type Date")
+      #(state, doc.from_string("Date"))
+    }
+    gleam.TimeOfDay -> {
+      let state =
+        state |> import_qualified("gleam/time/calendar", "type TimeOfDay")
+      #(state, doc.from_string("TimeOfDay"))
+    }
+    gleam.Timestamp -> {
+      let state =
+        state |> import_qualified("gleam/time/timestamp", "type Timestamp")
+      #(state, doc.from_string("Timestamp"))
+    }
     gleam.Int -> #(state, doc.from_string("Int"))
-    gleam.Float -> #(state, doc.from_string("Float"))
+    gleam.Float | gleam.Numeric -> #(state, doc.from_string("Float"))
     gleam.Bool -> #(state, doc.from_string("Bool"))
     gleam.String -> #(state, doc.from_string("String"))
-    gleam.Json -> #(state, doc.from_string("String"))
+    gleam.Json ->
+      case position {
+        EnumField -> #(state, doc.from_string("String"))
+        FunctionArgument -> {
+          let state = state |> import_qualified("gleam/json", "type Json")
+          #(state, doc.from_string("Json"))
+        }
+      }
     gleam.BitArray -> #(state, doc.from_string("BitArray"))
     gleam.Enum(original_name:, name:, variants:) -> #(
       add_enum_helpers(state, original_name, name, variants, NoHelpers),
@@ -339,7 +371,19 @@ fn gleam_type_to_field_type(
 
 /// Generates the code for a single file containing a bunch of typed queries.
 ///
-pub fn generate_code(queries: List(TypedQuery), version: String) -> String {
+pub fn generate_code(
+  version version: String,
+  // The directory all the queries come from.
+  for queries: List(TypedQuery),
+  from directory: String,
+) -> String {
+  // We need to sort the queries before generating any code, otherwise the order
+  // with which they will appear in the generated file won't be reproducible!
+  // That could cause CI checks like `gleam run -m squirrel check` to fail.
+  //
+  let queries =
+    list.sort(queries, fn(one, other) { string.compare(one.file, other.file) })
+
   let #(state, queries_docs) = {
     let state = default_codegen_state()
     use #(state, docs), query <- list.fold(over: queries, from: #(state, []))
@@ -392,8 +436,12 @@ pub fn generate_code(queries: List(TypedQuery), version: String) -> String {
     }
   }
 
-  code
-  |> doc.append(doc.line)
+  doc.concat([
+    doc.from_string(module_doc(version, directory)),
+    doc.lines(2),
+    code,
+    doc.line,
+  ])
   |> doc.to_string(80)
 }
 
@@ -463,26 +511,36 @@ fn query_doc(
     Error(_) -> #(state, doc.empty)
   }
 
-  let #(state, inputs, encoders) = {
+  let #(state, args, encoders) = {
     let acc = #(state, [], [])
-    use acc, param, i <- list.index_fold(params, acc)
-    let #(state, inputs, encoders) = acc
+    use #(state, args, encoders), param, i <- list.index_fold(params, acc)
 
-    let input = "arg_" <> int.to_string(i + 1)
-    let #(state, encoder) = gleam_type_to_encoder(state, param, input)
-    #(state, [input, ..inputs], [encoder, ..encoders])
+    let arg = "arg_" <> int.to_string(i + 1)
+    let #(state, arg_type) =
+      gleam_type_to_field_type(state, param, FunctionArgument)
+    let #(state, encoder) = gleam_type_to_encoder(state, param, arg)
+
+    let arg = doc.concat([doc.from_string(arg <> ": "), arg_type])
+    #(state, [arg, ..args], [encoder, ..encoders])
   }
-  let inputs = list.reverse(inputs)
+  let args = list.reverse(args)
   let encoders = list.reverse(encoders)
 
   let #(state, decoder) = decoder_doc(state, constructor_name, returns)
+  let args = [doc.from_string("db: pog.Connection"), ..args]
+
+  let returned = case returns {
+    [] -> doc.from_string("pog.Returned(Nil)")
+    _ -> call_doc("pog.Returned", [doc.from_string(constructor_name)])
+  }
+  let return = call_doc("Result", [returned, doc.from_string("pog.QueryError")])
 
   let code =
     doc.concat([
       record,
       doc.from_string(function_doc(version, query)),
       doc.line,
-      fun_doc(Public, gleam.value_identifier_to_string(name), ["db", ..inputs], [
+      fun_doc(Public, gleam.value_identifier_to_string(name), args, return, [
         let_var("decoder", decoder) |> doc.append(doc.from_string("\n")),
         string_doc(content)
           |> pipe_call_doc("pog.query", _, [])
@@ -498,6 +556,14 @@ fn query_doc(
 fn pipe_all_encoders(doc: Document, decoders: List(Document)) -> Document {
   use doc, decoder <- list.fold(over: decoders, from: doc)
   doc |> pipe_call_doc("pog.parameter", _, [decoder])
+}
+
+fn module_doc(version: String, directory: String) -> String {
+  "//// This module contains the code to run the sql queries defined in
+//// `" <> directory <> "`.
+//// > 🐿️ This module was generated automatically using " <> version <> " of
+//// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+////"
 }
 
 fn function_doc(version: String, query: TypedQuery) -> String {
@@ -548,7 +614,8 @@ fn record_doc(
     use #(state, fields), field <- list.fold(returns, from: #(state, []))
     let label =
       doc.from_string(gleam.value_identifier_to_string(field.label) <> ": ")
-    let #(state, field_type) = gleam_type_to_field_type(state, field.type_)
+    let #(state, field_type) =
+      gleam_type_to_field_type(state, field.type_, EnumField)
     let field = [label, field_type] |> doc.concat |> doc.group
 
     #(state, [field, ..fields])
@@ -672,7 +739,13 @@ fn enum_encoder_doc(
 
   let case_ = pipe_call_doc("pog.text", case_, [])
 
-  fun_doc(Public, enum_encoder_name(name), [var_name], [case_])
+  fun_doc(
+    Public,
+    enum_encoder_name(name),
+    [doc.from_string(var_name)],
+    doc.from_string("pog.Value"),
+    [case_],
+  )
 }
 
 fn enum_decoder_doc(
@@ -715,7 +788,12 @@ fn enum_decoder_doc(
         |> block,
     ])
 
-  fun_doc(Private, enum_decoder_name(name), [], [
+  let enum_decoder_type =
+    doc.from_string(
+      "decode.Decoder(" <> gleam.type_identifier_to_string(name) <> ")",
+    )
+
+  fun_doc(Private, enum_decoder_name(name), [], enum_decoder_type, [
     doc.from_string("use " <> var_name <> " <- decode.then(decode.string)"),
     case_,
   ])
@@ -735,8 +813,11 @@ fn uuid_decoder() {
 ///
 const nil_decoder = "decode.map(decode.dynamic, fn(_) { Nil })"
 
-/// A pretty printed decoder that decodes an n-item dynamic tuple using the
-/// `decode` package.
+/// A pretty printed decoder that decodes an n-item dynamic tuple with the given
+/// constructor wrapping the returned rows from a query.
+///
+/// If the query returns no columns (that is `returns == []`), then we default
+/// to building decoder that always returns `Nil`.
 ///
 fn decoder_doc(
   state: CodeGenState,
@@ -766,7 +847,8 @@ fn decoder_doc(
   let labelled_names = list.reverse(labelled_names)
 
   let success_line =
-    call_doc("decode.success", [call_doc(constructor, labelled_names)])
+    nested_calls_doc("decode.success", constructor, labelled_names)
+
   let doc = block(list.append(parameters, [success_line]))
   #(state, doc)
 }
@@ -791,9 +873,50 @@ fn pipe_call_doc(
 /// A pretty printed function call.
 ///
 fn call_doc(function: String, args: List(Document)) -> Document {
-  [doc.from_string(function), comma_list("(", args, ")")]
+  [doc.from_string(function), comma_list("(", args, ")") |> doc.group]
   |> doc.concat
   |> doc.group
+}
+
+/// This is a special case of a call document. To accomodate for a special rule
+/// of the Gleam formatter: when we have a function call that has a single other
+/// function as its one and only argument.
+///
+/// ```gleam
+/// first(second(arg_1, arg_2, arg_3, ..., arg_n))
+/// ```
+///
+/// When this needs to be broken, the formatter will only split the arguments of
+/// the second call like this:
+///
+/// ```gleam
+/// first(second(
+///   arg_1,
+///   ...,
+///   arg_n
+/// ))
+/// ```
+///
+/// Given the first and second function, and the arguments of the second
+/// function, this function builds a document that behaves like that.
+///
+fn nested_calls_doc(
+  first: String,
+  second: String,
+  arguments: List(Document),
+) -> Document {
+  [
+    doc.from_string(first),
+    doc.from_string("("),
+    // ^^ For the first call we don't add any breakable space after the `(`, so
+    //    that the only thing that can get broken on multiple lines are the
+    //    arguments of the second function
+    call_doc(second, arguments),
+    // ^^ And the second call is broken and behaves as usual, with its arguments
+    //    being nested
+    doc.from_string(")"),
+  ]
+  |> doc.concat
 }
 
 /// A pretty printed Gleam block.
@@ -821,18 +944,25 @@ type Publicity {
 fn fun_doc(
   publicity: Publicity,
   name: String,
-  args: List(String),
+  args: List(Document),
+  return_type: Document,
   body: List(Document),
 ) -> Document {
-  let args = list.map(args, doc.from_string)
   let publicity = case publicity {
     Private -> ""
     Public -> "pub "
   }
 
   [
-    doc.from_string(publicity <> "fn " <> name),
-    comma_list("(", args, ") "),
+    [
+      doc.from_string(publicity <> "fn " <> name),
+      comma_list("(", args, ")"),
+      doc.from_string(" -> "),
+      return_type,
+      doc.from_string(" "),
+    ]
+      |> doc.concat
+      |> doc.group,
     block(body),
   ]
   |> doc.concat
@@ -842,7 +972,8 @@ fn fun_doc(
 fn fn_doc(args: List(String), body: Document) -> Document {
   [
     doc.from_string("fn"),
-    comma_list("(", list.map(args, doc.from_string), ") {"),
+    comma_list("(", list.map(args, doc.from_string), ") {")
+      |> doc.group,
     [doc.space, body]
       |> doc.concat
       |> doc.nest(by: indent),
@@ -858,6 +989,7 @@ fn fn_doc(args: List(String), body: Document) -> Document {
 fn let_var(name: String, body: Document) -> Document {
   [doc.from_string("let " <> name <> " ="), doc.space, body]
   |> doc.concat
+  |> doc.group
 }
 
 /// A pretty printed Gleam string.
@@ -879,22 +1011,24 @@ fn string_doc(content: String) -> Document {
 /// A comma separated list of items with some given open and closed delimiters.
 ///
 fn comma_list(open: String, content: List(Document), close: String) -> Document {
-  [
-    doc.from_string(open),
-    [
-      // We want the first break to be nested
-      // in case the group is broken.
-      doc.soft_break,
-      doc.join(content, doc.break(", ", ",")),
-    ]
+  case content {
+    [] -> doc.from_string(open <> close)
+    _ ->
+      [
+        doc.from_string(open),
+        [
+          // We want the first break to be nested
+          // in case the group is broken.
+          doc.soft_break,
+          doc.join(content, doc.break(", ", ",")),
+        ]
+          |> doc.concat
+          |> doc.nest(by: indent),
+        doc.break("", ","),
+        doc.from_string(close),
+      ]
       |> doc.concat
-      |> doc.group
-      |> doc.nest(by: indent),
-    doc.break("", ","),
-    doc.from_string(close),
-  ]
-  |> doc.concat
-  |> doc.group
+  }
 }
 
 // --- UTILS TO WORK WITH STATE ------------------------------------------------

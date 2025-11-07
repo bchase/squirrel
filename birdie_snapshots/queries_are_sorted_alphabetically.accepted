@@ -1,0 +1,46 @@
+---
+version: 1.4.0
+title: queries are sorted alphabetically
+file: ./test/squirrel_test.gleam
+test_name: queries_are_sorted_alphabetically_test
+---
+
+import gleam/dynamic/decode
+import pog
+
+pub type FirstRow {
+  FirstRow(wibble: Int)
+}
+
+pub fn first(
+  db: pog.Connection,
+) -> Result(pog.Returned(FirstRow), pog.QueryError) {
+  let decoder = {
+    use wibble <- decode.field(0, decode.int)
+    decode.success(FirstRow(wibble:))
+  }
+
+  "select 1 as wibble"
+  |> pog.query
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
+pub type LastRow {
+  LastRow(wibble: Int)
+}
+
+pub fn last(
+  db: pog.Connection,
+) -> Result(pog.Returned(LastRow), pog.QueryError) {
+  let decoder = {
+    use wibble <- decode.field(0, decode.int)
+    decode.success(LastRow(wibble:))
+  }
+
+  "select 1 as wibble"
+  |> pog.query
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+

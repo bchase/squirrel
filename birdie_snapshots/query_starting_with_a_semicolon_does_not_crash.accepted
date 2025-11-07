@@ -1,0 +1,28 @@
+---
+version: 1.4.0
+title: query starting with a semicolon does not crash
+file: ./test/squirrel_test.gleam
+test_name: query_starting_with_a_semicolon_does_not_crash_test
+---
+
+import gleam/dynamic/decode
+import pog
+
+pub type QueryRow {
+  QueryRow(result: Int)
+}
+
+pub fn query(
+  db: pog.Connection,
+) -> Result(pog.Returned(QueryRow), pog.QueryError) {
+  let decoder = {
+    use result <- decode.field(0, decode.int)
+    decode.success(QueryRow(result:))
+  }
+
+  ";select 1 as result"
+  |> pog.query
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+

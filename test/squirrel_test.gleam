@@ -1,6 +1,7 @@
 import birdie
 import filepath
 import glam/doc
+import gleam/erlang/process
 import gleam/list
 import gleam/string
 import gleeunit
@@ -28,7 +29,9 @@ const database = "squirrel_test"
 const port = 5432
 
 pub fn test_config() -> pog.Config {
-  pog.default_config()
+  let name = process.new_name("test")
+
+  pog.default_config(name)
   |> pog.port(port)
   |> pog.user(user)
   |> pog.host(host)
@@ -36,7 +39,8 @@ pub fn test_config() -> pog.Config {
 }
 
 fn setup_database() {
-  let db = pog.connect(test_config())
+  let assert Ok(actor) = pog.start(test_config())
+  let db = actor.data
 
   let assert Ok(_) =
     "
@@ -156,6 +160,17 @@ create table if not exists categories_issue75 (
     |> pog.query
     |> pog.execute(db)
 
+  // https://github.com/giacomocavalieri/squirrel/issues/114
+  let assert Ok(_) =
+    "
+do $$ begin
+  if not exists (select * from pg_type where typname = 'issue_114_aaaaaaaaaaaaaaaaa') then
+    create type issue_114_aaaaaaaaaaaaaaaaa as enum('wibble');
+  end if;
+end $$;"
+    |> pog.query
+    |> pog.execute(db)
+
   let assert Ok(_) =
     "
 create table if not exists items_issue75 (
@@ -176,7 +191,12 @@ create table if not exists items_categories_issue75 (
     |> pog.query
     |> pog.execute(db)
 
-  pog.disconnect(db)
+  let assert Ok(_) =
+    "create extension if not exists citext;"
+    |> pog.query
+    |> pog.execute(db)
+
+  Nil
 }
 
 // --- ASSERTION HELPERS -------------------------------------------------------
@@ -197,10 +217,47 @@ fn should_codegen(query: String) -> String {
   should_codegen_queries([#("query", query)])
 }
 
+fn should_codegen_with_comments(query: String) {
+  should_codegen_queries_options(
+    [#("query", query)],
+    CodegenOptions(strip_comments: False),
+  )
+}
+
 fn should_codegen_queries(queries: List(#(String, String))) -> String {
+  should_codegen_queries_options(queries, CodegenOptions(strip_comments: True))
+}
+
+fn should_codegen_queries_with_comments(
+  queries: List(#(String, String)),
+) -> String {
+  should_codegen_queries_options(queries, CodegenOptions(strip_comments: False))
+}
+
+fn should_codegen_queries_options(
+  queries: List(#(String, String)),
+  options: CodegenOptions,
+) {
   // We assert everything went smoothly and we have no errors in the query.
   let assert Ok(#(queries, [])) = type_queries(queries)
-  query.generate_code(queries, "v-test")
+  let code =
+    query.generate_code("v-test", for: queries, from: "./test-directory")
+
+  let CodegenOptions(strip_comments:) = options
+  case strip_comments {
+    False -> code
+    True ->
+      string.split(code, on: "\n")
+      |> list.filter(keeping: fn(line) { !string.starts_with(line, "//") })
+      |> string.join(with: "\n")
+  }
+}
+
+type CodegenOptions {
+  CodegenOptions(
+    /// Removes all lines starting with `//` from the generated code.
+    strip_comments: Bool,
+  )
 }
 
 fn type_queries(
@@ -233,7 +290,7 @@ fn type_queries(
         user: user,
         database: database,
         password: "",
-        timeout: 1000,
+        timeout_seconds: 1,
       ),
     )
   }
@@ -258,16 +315,40 @@ pub fn int_encoding_test() {
   |> birdie.snap(title: "int encoding")
 }
 
-pub fn float_decoding_test() {
-  "select 1.1 as res"
+pub fn numeric_decoding_test() {
+  "select 1.1::numeric as res"
   |> should_codegen
-  |> birdie.snap(title: "float decoding")
+  |> birdie.snap(title: "numeric decoding")
 }
 
-pub fn float_encoding_test() {
-  "select true as res where $1 = 1.1"
+pub fn numeric_encoding_test() {
+  "select true as res where $1 = 1.1::numeric"
   |> should_codegen
-  |> birdie.snap(title: "float encoding")
+  |> birdie.snap(title: "numeric encoding")
+}
+
+pub fn float4_decoding_test() {
+  "select 1.1::float4 as res"
+  |> should_codegen
+  |> birdie.snap(title: "float4 decoding")
+}
+
+pub fn float4_encoding_test() {
+  "select true as res where $1 = 1.1::float4"
+  |> should_codegen
+  |> birdie.snap(title: "float4 encoding")
+}
+
+pub fn float8_decoding_test() {
+  "select 1.1::float8 as res"
+  |> should_codegen
+  |> birdie.snap(title: "float8 decoding")
+}
+
+pub fn float8_encoding_test() {
+  "select true as res where $1 = 1.1::float8"
+  |> should_codegen
+  |> birdie.snap(title: "float8 encoding")
 }
 
 pub fn string_decoding_test() {
@@ -328,6 +409,18 @@ pub fn varchar_encoding_test() {
   "select true as res where $1 = 'wibble'::varchar(6)"
   |> should_codegen
   |> birdie.snap(title: "varchar encoding")
+}
+
+pub fn citext_decoding_test() {
+  "select 'wibble'::citext as res"
+  |> should_codegen
+  |> birdie.snap(title: "citext decoding")
+}
+
+pub fn citext_encoding_test() {
+  "select true as res where $1 = 'wibble'::citext"
+  |> should_codegen
+  |> birdie.snap(title: "citext encoding")
 }
 
 pub fn bool_decoding_test() {
@@ -435,6 +528,18 @@ pub fn date_encoding_test() {
   |> birdie.snap(title: "date encoding")
 }
 
+pub fn time_of_day_decoding_test() {
+  "select '11:10:01'::time as res"
+  |> should_codegen
+  |> birdie.snap(title: "time decoding")
+}
+
+pub fn time_of_day_encoding_test() {
+  "select true as res where $1 = '11:10:00'::time"
+  |> should_codegen
+  |> birdie.snap(title: "time encoding")
+}
+
 pub fn timestamp_decoding_test() {
   "select 'Jan-2-1970 12:34:56'::timestamp as res"
   |> should_codegen
@@ -475,7 +580,7 @@ pub fn query_with_comment_test() {
 -- This is a comment
 select true as res
 "
-  |> should_codegen
+  |> should_codegen_with_comments
   |> birdie.snap(title: "query with comment")
 }
 
@@ -485,7 +590,7 @@ pub fn query_with_multiline_comment_test() {
 -- that goes over multiple lines!
 select true as res
 "
-  |> should_codegen
+  |> should_codegen_with_comments
   |> birdie.snap(title: "query with multiline comment")
 }
 
@@ -555,6 +660,63 @@ pub fn query_with_quoted_string_is_properly_escaped_test() {
   |> birdie.snap(title: "query with quoted string is properly escaped")
 }
 
+// https://github.com/giacomocavalieri/squirrel/issues/77
+pub fn decode_success_with_long_builder_is_properly_formatted_not_breaking_it_on_a_different_line_test() {
+  "select
+  1 as first_column,
+  2 as second_column,
+  3 as third_column,
+  4 as fourth_column,
+  5 as fifth_column,
+  6 as sixth_column;"
+  |> should_codegen
+  |> birdie.snap(
+    title: "decode.success with long builder is properly formatted not breaking it on a different line",
+  )
+}
+
+// https://github.com/giacomocavalieri/squirrel/pull/87#issuecomment-2994056542
+pub fn decode_success_with_long_builder_close_to_80_chars_is_properly_formatted_not_breaking_it_on_a_different_line_test() {
+  "select
+  1 as aaaaaaaa,
+  2 as bbbbbbbbbbbbbbb,
+  3 as ccc,
+  4 as dddddddddddddddd;"
+  |> should_codegen
+  |> birdie.snap(
+    title: "decode.success with long builder close to 80 chars is properly formatted not breaking it on a different line",
+  )
+}
+
+pub fn queries_are_sorted_alphabetically_test() {
+  should_codegen_queries([
+    #("last", "select 1 as wibble"),
+    #("first", "select 1 as wibble"),
+  ])
+  |> birdie.snap(title: "queries are sorted alphabetically")
+}
+
+pub fn query_with_many_arguments_returning_nil_comment_test() {
+  "
+with a as (
+  select $1, *
+  from unnest(
+    $2::text[],
+    $3::text[],
+    $4::text[],
+    $5::text[],
+    $6::text[],
+    $7::text[],
+    $8::text[],
+    $9::text[]
+  )
+)
+select
+"
+  |> should_codegen_with_comments
+  |> birdie.snap(title: "query with many arguments returning nil")
+}
+
 // --- ERRROR TESTS ------------------------------------------------------------
 // This is a group of tests to ensure that the errors look good when something
 // goes wrong.
@@ -573,6 +735,12 @@ from
 "
   |> should_error
   |> birdie.snap(title: "column with invalid name")
+}
+
+pub fn timestampz_has_a_nice_hint_nudging_to_use_a_timestamp_test() {
+  "select timestamp with time zone '11 oct 1998'"
+  |> should_error
+  |> birdie.snap(title: "timestampz has a nice hint nudging to use a timestamp")
 }
 
 pub fn query_with_syntax_error_test() {
@@ -651,27 +819,27 @@ pub fn query_returning_columns_with_same_names_test() {
 //
 
 pub fn checking_two_identical_snippets_of_code_test() {
-  let code = should_codegen("select 1 as number")
+  let code = should_codegen_with_comments("select 1 as number")
   let assert squirrel.Same = squirrel.compare_code_snippets(code, code)
 }
 
 pub fn if_code_snippets_differ_by_formatting_they_are_the_same_test() {
-  let expected_code = should_codegen("select 1 as number")
+  let expected_code = should_codegen_with_comments("select 1 as number")
   let actual_code = expected_code |> string.replace(each: "\n", with: "\n ")
   let assert squirrel.Same =
     squirrel.compare_code_snippets(expected_code, actual_code)
 }
 
 pub fn if_code_snippets_differ_by_comments_they_are_the_same_test() {
-  let expected_code = should_codegen("select 1 as number")
+  let expected_code = should_codegen_with_comments("select 1 as number")
   let actual_code = "// Comment!\n" <> expected_code
   let assert squirrel.Same =
     squirrel.compare_code_snippets(expected_code, actual_code)
 }
 
 pub fn comparing_different_snippets_of_code_test() {
-  let expected_code = should_codegen("select 1 as number")
-  let actual_code = should_codegen("select 2 as number")
+  let expected_code = should_codegen_with_comments("select 1 as number")
+  let actual_code = should_codegen_with_comments("select 2 as number")
   let assert squirrel.Different =
     squirrel.compare_code_snippets(expected_code, actual_code)
 }
@@ -705,16 +873,14 @@ on conflict on constraint wobble do nothing;
 }
 
 // https://github.com/giacomocavalieri/squirrel/issues/24
-pub fn query_starting_with_a_semicolon_produces_syntax_error_instead_of_crashing_test() {
-  should_error(";select 1")
-  |> birdie.snap(
-    title: "query starting with a semicolon produces syntax error instead of crashing",
-  )
+pub fn query_starting_with_a_semicolon_does_not_crash_test() {
+  should_codegen(";select 1 as result")
+  |> birdie.snap(title: "query starting with a semicolon does not crash")
 }
 
 // https://github.com/giacomocavalieri/squirrel/issues/29
 pub fn there_is_only_one_empty_line_between_code_generated_for_different_queries_test() {
-  should_codegen_queries([
+  should_codegen_queries_with_comments([
     #("one", "select 1 as res"),
     #("two", "select 2 as res"),
   ])
@@ -736,7 +902,7 @@ pub fn a_query_failing_does_not_change_the_other_query_error_test() {
 
 pub fn a_query_failing_does_not_change_the_other_query_error_2_test() {
   should_error_queries([
-    #("wibble", "; select 1 as res"),
+    #("wibble", "error! select 1 as res"),
     #("wobble", "select wobble from wobble"),
   ])
   |> birdie.snap(
@@ -795,4 +961,46 @@ left join items_categories_issue75 ic on ic.item_id = i.id
 where ic.category_id in (select id from subcategories);"
   |> should_codegen
   |> birdie.snap(title: "recursive common table query with semi join")
+}
+
+pub fn squirrel_supports_do_blocks_test() {
+  "
+  do $$ begin
+    select 1;
+  end $$;
+  "
+  |> should_codegen
+  |> birdie.snap(title: "squirrel supports do blocks")
+}
+
+pub fn file_with_squirrel_module_comment_is_considered_as_generated_test() {
+  assert squirrel.LikelyGenerated
+    == "select 1 as wibble"
+    |> should_codegen_with_comments
+    |> squirrel.classify_file_content
+}
+
+pub fn file_with_squirrel_function_comment_is_considered_as_generated_test() {
+  assert squirrel.LikelyGenerated
+    == "select 1 as wibble"
+    |> should_codegen_with_comments
+    // We remove the starting module comment, since we want to make sure
+    // squirrel can pick up a generated file even if that bit is missing!
+    |> string.split(on: "\n")
+    |> list.filter(fn(line) { !string.starts_with(line, "////") })
+    |> string.join(with: "\n")
+    |> squirrel.classify_file_content
+}
+
+// If the length is 80 chars it's enough to generate a decoder with a comma in
+// its empty args list, that's invalid syntax!
+//
+// https://github.com/giacomocavalieri/squirrel/issues/114
+//
+pub fn enum_with_a_long_enoug_name_does_not_generate_invalid_decoder_test() {
+  "select 'wibble'::issue_114_aaaaaaaaaaaaaaaaa"
+  |> should_codegen
+  |> birdie.snap(
+    title: "enum with a long enoug name does not generate invalid decoder",
+  )
 }

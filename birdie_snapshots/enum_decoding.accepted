@@ -1,29 +1,20 @@
 ---
-version: 1.2.6
+version: 1.4.0
 title: enum decoding
 file: ./test/squirrel_test.gleam
 test_name: enum_decoding_test
 ---
+
 import gleam/dynamic/decode
 import pog
 
-/// A row you get from running the `query` query
-/// defined in `query.sql`.
-///
-/// > 🐿️ This type definition was generated automatically using v-test of the
-/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
 pub type QueryRow {
   QueryRow(squirrel_colour: SquirrelColour)
 }
 
-/// Runs the `query` query
-/// defined in `query.sql`.
-///
-/// > 🐿️ This function was generated automatically using v-test of
-/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
-pub fn query(db) {
+pub fn query(
+  db: pog.Connection,
+) -> Result(pog.Returned(QueryRow), pog.QueryError) {
   let decoder = {
     use squirrel_colour <- decode.field(0, squirrel_colour_decoder())
     decode.success(QueryRow(squirrel_colour:))
@@ -35,20 +26,14 @@ pub fn query(db) {
   |> pog.execute(db)
 }
 
-// --- Enums -------------------------------------------------------------------
 
-/// Corresponds to the Postgres `squirrel_colour` enum.
-///
-/// > 🐿️ This type definition was generated automatically using v-test of the
-/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
 pub type SquirrelColour {
   LightBrown
   Grey
   Red
 }
 
-fn squirrel_colour_decoder() {
+fn squirrel_colour_decoder() -> decode.Decoder(SquirrelColour) {
   use squirrel_colour <- decode.then(decode.string)
   case squirrel_colour {
     "light brown" -> decode.success(LightBrown)
@@ -57,3 +42,4 @@ fn squirrel_colour_decoder() {
     _ -> decode.failure(LightBrown, "SquirrelColour")
   }
 }
+

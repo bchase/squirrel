@@ -18,10 +18,12 @@ pub type Type {
   List(Type)
   Option(Type)
   Date
+  TimeOfDay
   Timestamp
   BitArray
   Int
   Float
+  Numeric
   Bool
   String
   Json

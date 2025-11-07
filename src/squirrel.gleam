@@ -17,14 +17,14 @@ import glexer/token
 import simplifile
 import squirrel/internal/database/postgres
 import squirrel/internal/error.{
-  type Error, CannotReadFile, CannotWriteToFile, InvalidConnectionString,
-  OutdatedFile,
+  type Error, CannotOverwriteExistingFile, CannotReadFile, CannotWriteToFile,
+  InvalidConnectionString, OutdatedFile,
 }
 import squirrel/internal/project
 import squirrel/internal/query.{type TypedQuery}
 import term_size
 
-const squirrel_version = "v3.0.3"
+const squirrel_version = "v4.5.0"
 
 /// 🐿️ Performs code generation for your Gleam project.
 ///
@@ -45,7 +45,7 @@ const squirrel_version = "v3.0.3"
 /// > be a valid connection string with the following format:
 /// >
 /// > ```txt
-/// > postgres://user:password@host:port/database
+/// > postgres://user:password@host:port/database?connect_timeout=seconds
 /// > ```
 /// >
 /// > If a `DATABASE_URL` variable is not set, Squirrel will instead read your
@@ -56,10 +56,11 @@ const squirrel_version = "v3.0.3"
 /// > - `PGUSER`: `"postgres"`
 /// > - `PGDATABASE`: the name of your Gleam project
 /// > - `PGPASSWORD`: `""`
+/// > - `PGCONNECT_TIMEOUT`: `5` seconds
 ///
 /// > ⚠️ The generated code relies on the
-/// > [`pog`](https://hexdocs.pm/pog/) package to work, so make sure to
-/// > add that dependency to your project.
+/// > [`pog`](https://hexdocs.pm/pog/) package to work, so make sure to add
+/// > that dependency to your project.
 ///
 pub fn main() {
   case parse_cli_args(), connection_options() {
@@ -85,13 +86,19 @@ pub fn main() {
     Ok(mode), Ok(options) -> {
       let generated_queries =
         walk(project.src())
+        |> dict.merge(walk(project.test_()))
+        |> dict.merge(walk(project.dev()))
         |> generate_queries(options)
 
       let #(report, status_code) = case mode {
         GenerateCode ->
-          generated_queries
-          |> write_queries
-          |> report_written_queries
+          case ensure_no_errors(generated_queries) {
+            Error(errors) -> report_errors(errors)
+            Ok(generated_queries) ->
+              generated_queries
+              |> write_queries
+              |> report_written_queries
+          }
 
         CheckGeneratedCode ->
           generated_queries
@@ -102,6 +109,21 @@ pub fn main() {
       io.println(report)
       exit(status_code)
     }
+  }
+}
+
+fn ensure_no_errors(
+  generated_queries: Dict(String, #(List(TypedQuery), List(Error))),
+) -> Result(Dict(String, List(TypedQuery)), List(Error)) {
+  let all_errors =
+    dict.fold(generated_queries, [], fn(errors, _directory, queries_and_errors) {
+      let #(_queries, new_errors) = queries_and_errors
+      list.append(new_errors, errors)
+    })
+
+  case all_errors {
+    [_, ..] -> Error(all_errors)
+    [] -> Ok(dict.map_values(generated_queries, fn(_, queries) { queries.0 }))
   }
 }
 
@@ -180,7 +202,7 @@ const default_password = ""
 
 const default_port = 5432
 
-const default_timeout = 1000
+const default_timeout = 5
 
 /// Creates a `ConnectionOptions` reading values from env variables and falling
 /// back to some defaults if any required one is not set.
@@ -195,8 +217,12 @@ fn connection_options_from_variables() -> postgres.ConnectionOptions {
     |> result.unwrap(default_database)
   let port =
     envoy.get("PGPORT")
-    |> result.then(int.parse)
+    |> result.try(int.parse)
     |> result.unwrap(default_port)
+  let timeout_seconds =
+    envoy.get("PGCONNECT_TIMEOUT")
+    |> result.try(int.parse)
+    |> result.unwrap(default_timeout)
 
   postgres.ConnectionOptions(
     host:,
@@ -204,7 +230,7 @@ fn connection_options_from_variables() -> postgres.ConnectionOptions {
     user:,
     password:,
     database:,
-    timeout: default_timeout,
+    timeout_seconds:,
   )
 }
 
@@ -213,10 +239,19 @@ fn connection_options_from_variables() -> postgres.ConnectionOptions {
 ///
 fn parse_connection_url(raw: String) -> Result(postgres.ConnectionOptions, Nil) {
   use uri <- result.try(uri.parse(raw))
-  let Uri(scheme:, userinfo:, host:, port:, path:, ..) = uri
+  let Uri(scheme:, userinfo:, host:, port:, path:, query:, ..) = uri
+
+  use parameters <- result.try(case query {
+    None -> Ok([])
+    Some(parameters) -> uri.parse_query(parameters)
+  })
   use _ <- result.try(check_scheme(scheme))
   let #(user, password) = parse_user_and_password_from_userinfo(userinfo)
   let database = parse_database_from_path(path)
+  use timeout <- result.try(case list.key_find(parameters, "connect_timeout") {
+    Error(_) -> Ok(default_timeout)
+    Ok(timeout) -> int.parse(timeout)
+  })
 
   Ok(postgres.ConnectionOptions(
     host: host |> option.unwrap(default_host),
@@ -224,7 +259,7 @@ fn parse_connection_url(raw: String) -> Result(postgres.ConnectionOptions, Nil) 
     user: user |> option.unwrap(default_user),
     password: password |> option.unwrap(default_password),
     database: database |> option.unwrap(default_database),
-    timeout: default_timeout,
+    timeout_seconds: timeout,
   ))
 }
 
@@ -277,7 +312,11 @@ fn walk(from: String) -> Dict(String, List(String)) {
     }
 
     _ -> {
-      let assert Ok(files) = simplifile.read_directory(from)
+      let files = case simplifile.read_directory(from) {
+        Ok(files) -> files
+        Error(simplifile.Enoent) -> []
+        Error(_) -> panic as { "couldn't read directory: " <> from }
+      }
       let directories = {
         use file <- list.filter_map(files)
         let file_name = filepath.join(from, file)
@@ -317,35 +356,88 @@ fn generate_queries(
 
 /// Given the queries generated by `generate_queries`, tries to write those to
 /// their own file and returns a dictionary that - for each file - holds the
-/// number of queries that could be generated and a list of all the errors that
-/// took place.
+/// number of queries that could be generated or the error that occurred trying
+/// to write the query.
 ///
 fn write_queries(
-  queries: Dict(String, #(List(TypedQuery), List(Error))),
-) -> Dict(String, #(Int, List(Error))) {
-  use directory, #(queries, errors) <- dict.map_values(queries)
+  queries: Dict(String, List(TypedQuery)),
+) -> Dict(String, Result(Int, Error)) {
+  use directory, queries <- dict.map_values(queries)
   let output_file = directory_to_output_file(directory)
-  case write_queries_to_file(queries, to: output_file) {
-    Ok(n) -> #(n, errors)
-    Error(error) -> #(list.length(queries), [error, ..errors])
-  }
+  write_queries_to_file(queries, from: directory, to: output_file)
 }
 
 fn write_queries_to_file(
   queries: List(TypedQuery),
+  from queries_directory: String,
   to file: String,
 ) -> Result(Int, Error) {
   use <- bool.guard(when: queries == [], return: Ok(0))
   let directory = filepath.directory_name(file)
   let _ = simplifile.create_directory_all(directory)
 
-  let code = query.generate_code(queries, squirrel_version)
-  let try_write =
-    simplifile.write(code, to: file)
-    |> result.map_error(CannotWriteToFile(file, _))
+  let code =
+    query.generate_code(squirrel_version, for: queries, from: queries_directory)
 
-  use _ <- result.try(try_write)
-  Ok(list.length(queries))
+  safely_overwrite(to: file, content: code)
+  |> result.replace(list.length(queries))
+}
+
+fn safely_overwrite(to file: String, content code: String) -> Result(Nil, Error) {
+  case simplifile.read(file) |> result.map(classify_file_content) {
+    // If the file is generated, empty, or doesn't exist at all then it's safe
+    // to overwrite it!
+    Ok(LikelyGenerated) | Ok(Empty) | Error(simplifile.Enoent) ->
+      simplifile.write(code, to: file)
+      |> result.map_error(CannotWriteToFile(file, _))
+
+    // Otherwise, we can't safely replace its content.
+    Ok(NotGenerated) -> Error(CannotOverwriteExistingFile(file))
+    Error(reason) -> Error(CannotWriteToFile(file, reason))
+  }
+}
+
+@internal
+pub fn classify_file_content(content: String) -> FileOrigin {
+  let likely_generated =
+    // In newer versions of squirrel this is always at the beginning of the
+    // file and it would be enough to check for this comment to establish if
+    // a file is generated or not...
+    string.contains(
+      content,
+      "> 🐿️ This module was generated automatically using",
+    )
+    // ...but in older versions that module comment is not present! So we
+    // need to check if there's any function generated by squirrel.
+    || string.contains(
+      content,
+      "> 🐿️ This function was generated automatically using",
+    )
+
+  case likely_generated {
+    True -> LikelyGenerated
+    False ->
+      case string.trim(content) {
+        "" -> Empty
+        _ -> NotGenerated
+      }
+  }
+}
+
+@internal
+pub type FileOrigin {
+  /// The file was most likely generated by Squirrel. It can safely be
+  /// overwritten as we do not risk deleting code written by a human.
+  ///
+  LikelyGenerated
+
+  /// The file wasn't likely generated but it's only made of whitespace, so it's
+  /// safe to override.
+  Empty
+
+  /// The file was most likely not generated by Squirrel. It is not safe to
+  /// overwrite it, or we'd risk deleting code written by a human!
+  NotGenerated
 }
 
 fn directory_to_output_file(directory: String) -> String {
@@ -397,7 +489,11 @@ fn check_queries_code(
   queries: List(TypedQuery),
   actual_code: String,
 ) -> CheckResult {
-  let expected_code = query.generate_code(queries, squirrel_version)
+  // The code is compared ignoring any comments, so we have no need to know
+  // what actual directory the queries come from: that information is only used
+  // to generate better comments!
+  let expected_code =
+    query.generate_code(squirrel_version, for: queries, from: "check-queries")
   compare_code_snippets(actual_code, expected_code)
 }
 
@@ -447,17 +543,16 @@ fn term_width() -> Int {
 }
 
 fn report_written_queries(
-  dirs: Dict(String, #(Int, List(Error))),
+  directories: Dict(String, Result(Int, Error)),
 ) -> #(String, Int) {
   let #(ok, errors) = {
-    use acc, _, #(oks, errors) <- dict.fold(dirs, #(0, []))
-    let #(all_ok, all_errors) = acc
-    #(all_ok + oks, errors |> list.append(all_errors))
+    use acc, _, outcome <- dict.fold(directories, #(0, []))
+    let #(generated_queries, errors) = acc
+    case outcome {
+      Error(error) -> #(generated_queries, [error, ..errors])
+      Ok(new_count) -> #(generated_queries + new_count, errors)
+    }
   }
-
-  let errors_doc =
-    list.map(errors, error.to_doc)
-    |> doc.join(with: doc.lines(2))
 
   let status_code = case errors {
     [_, ..] -> 1
@@ -465,7 +560,10 @@ fn report_written_queries(
   }
 
   let report = case ok, errors {
-    0, [_, ..] -> doc.to_string(errors_doc, term_width())
+    0, [_, ..] ->
+      errors_to_doc(errors)
+      |> doc.to_string(term_width())
+
     0, [] ->
       [
         text_with_header(
@@ -475,7 +573,7 @@ fn report_written_queries(
         doc.lines(2),
         flexible_string(
           "Hint: I look for all `*.sql` files in any directory called `sql`
-under your project's `src` directory.",
+under your project's `src`, `test`, and `dev` directories.",
         ),
       ]
       |> doc.concat
@@ -496,7 +594,7 @@ under your project's `src` directory.",
 
     n, [_, ..] ->
       [
-        errors_doc,
+        errors_to_doc(errors),
         doc.lines(2),
         text_with_header(
           "🥜 ",
@@ -514,7 +612,19 @@ under your project's `src` directory.",
   #(report, status_code)
 }
 
-fn report_checked_queries(dirs: Dict(String, Result(Nil, List(Error)))) {
+fn errors_to_doc(errors: List(Error)) -> Document {
+  list.map(errors, error.to_doc)
+  |> doc.join(with: doc.lines(2))
+}
+
+fn report_errors(errors: List(Error)) -> #(String, Int) {
+  let report = errors_to_doc(errors) |> doc.to_string(term_width())
+  #(report, 1)
+}
+
+fn report_checked_queries(
+  dirs: Dict(String, Result(Nil, List(Error))),
+) -> #(String, Int) {
   let errors = {
     use all_errors, _, result <- dict.fold(dirs, [])
     case result {
